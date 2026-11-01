@@ -1,0 +1,71 @@
+# Политика риск-контура оплаты. Все пороги — стартовые значения,
+# калибруются на исторических данных Ticketon (см. README, раздел «Калибровка»).
+version: "2026-11-01"
+
+# Уровни риска по итоговому баллу (0..100) и действие маршрутизации
+levels:
+  - {name: low,      max_score: 29,  action: allow_frictionless}  # 3DS2 без челленджа / исключение
+  - {name: medium,   max_score: 54,  action: challenge_3ds}       # 3-D Secure с челленджем
+  - {name: high,     max_score: 79,  action: challenge_3ds_strict} # 3DS + лимиты, без исключений, ручная проверка выдачи билета
+  - {name: critical, max_score: 100, action: decline}             # отказ до отправки в эквайринг
+
+# Сигналы риска: вес в баллах. Итог = сумма весов сработавших сигналов (ограничен 100),
+# минус «доверительные» сигналы (отрицательные веса).
+signals:
+  new_account:            8   # аккаунт моложе 24 ч
+  guest_checkout:         6   # оплата без входа в аккаунт
+  email_disposable:       10  # одноразовый домен почты
+  bin_country_mismatch:   12  # страна BIN ≠ страна IP
+  ip_proxy_or_hosting:    15  # IP из дата-центра / прокси / TOR
+  geo_far_from_event:     6   # покупатель далеко от города события (не для туристов-постоянников)
+  high_amount:            10  # сумма заказа выше 95-го перцентиля по событию
+  many_tickets:           8   # ≥ 6 билетов в заказе
+  hot_event:              6   # событие с высоким спросом / перепродажей
+  last_minute:            5   # до начала события < 3 ч (типично для кардинга: быстро сбыть)
+  card_new_to_account:    6   # карта впервые у этого аккаунта
+  cards_per_device_24h:   14  # ≥ 3 разных карт с устройства за 24 ч
+  attempts_per_card_1h:   12  # ≥ 3 попыток по одной карте за 1 ч
+  declines_device_1h:     14  # ≥ 2 отказа эмитента с устройства за 1 ч
+  accounts_per_card_7d:   12  # карта в ≥ 3 аккаунтах за 7 дней
+  name_email_mismatch:    4   # имя держателя не похоже на имя/почту профиля
+  fast_checkout:          8   # от открытия формы до оплаты < 8 с (бот)
+  risk_list_hit:          30  # совпадение с серым списком (устройство/карта/почта после фрода)
+  # доверительные сигналы
+  trusted_customer:      -20  # ≥ 3 оплат этой картой без споров и с посещением события
+  verified_phone:        -5   # подтверждённый телефон
+
+# Пороги срабатывания (используются в features.py)
+thresholds:
+  new_account_hours: 24
+  many_tickets: 6
+  last_minute_hours: 3
+  cards_per_device_24h: 3
+  attempts_per_card_1h: 3
+  declines_device_1h: 2
+  accounts_per_card_7d: 3
+  fast_checkout_sec: 8
+  trusted_min_paid_orders: 3
+  high_amount_kzt: 150000
+
+# Жёсткие правила — срабатывают до скоринга
+hard_rules:
+  blocklist_decline: true          # чёрный список (подтверждённый фрод) → отказ
+  max_amount_guest_kzt: 300000     # гость, сумма выше → минимум 3DS strict
+
+# Защита от card testing
+card_testing:
+  small_amount_kzt: 1000           # «пробные» суммы
+  device_distinct_cards_10m: 3     # разных карт с устройства за 10 мин → блок устройства
+  ip_distinct_cards_10m: 5         # разных карт с IP за 10 мин → блок IP
+  bin_distinct_cards_10m: 15       # разных карт одного BIN за 10 мин (глобально) → BIN под 3DS
+  block_ttl_min: 60
+  # «Режим щита»: глобальная доля отказов эмитента за 5 мин выше порога
+  shield_decline_rate_5m: 0.35
+  shield_min_attempts_5m: 40
+  shield_ttl_min: 30
+
+# Чарджбэки
+chargebacks:
+  represent_min_evidence_score: 60  # оспаривать, если доказательная база ≥ 60 баллов
+  response_days: 20                 # внутренний срок подготовки (у МПС окно ~30–45 дней)
+  graylist_ttl_days: 180

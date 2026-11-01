@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Риск-контур оплаты — прототип</title>
+<style>
+  :root { --ink:#1b2430; --muted:#5f6b7a; --line:#e3e7ec; --bg:#f6f7f9; --card:#fff;
+          --ok:#1f8a5b; --warn:#c77d0a; --bad:#c23b3b; --acc:#2456c9; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif; color:var(--ink); background:var(--bg); }
+  header { background:#14213d; color:#fff; padding:18px 32px; display:flex; align-items:center; gap:16px; }
+  header h1 { font-size:19px; margin:0; font-weight:600; }
+  header .tag { margin-left:auto; background:#fca311; color:#14213d; padding:4px 10px; border-radius:4px; font-size:12px; font-weight:600; }
+  main { max-width:1180px; margin:0 auto; padding:24px 32px 48px; }
+  h2 { font-size:16px; margin:28px 0 10px; }
+  .note { color:var(--muted); font-size:12.5px; margin:0 0 12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px 18px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-weight:600; color:var(--muted); font-size:12.5px; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .best { color:var(--ok); font-weight:600; }
+  .worst { color:var(--bad); }
+  .pol-risk { background:#eef3ff; }
+  .grid3 { display:grid; grid-template-columns:repeat(3, 1fr); gap:14px; }
+  .bars .row { display:grid; grid-template-columns:110px 1fr 90px; align-items:center; gap:8px; margin:5px 0; }
+  .bar { height:14px; border-radius:3px; background:#9aa7b8; }
+  .bar.r { background:var(--acc); }
+  .bars h3 { font-size:13px; margin:0 0 8px; }
+  .btns button { font:inherit; border:1px solid var(--line); background:#fff; padding:7px 12px; border-radius:6px; cursor:pointer; margin-right:6px; }
+  .btns button:hover { border-color:var(--acc); color:var(--acc); }
+  .pill { display:inline-block; padding:2px 9px; border-radius:10px; font-size:12px; font-weight:600; color:#fff; }
+  .low{background:var(--ok)} .medium{background:var(--warn)} .high{background:#d0601b} .critical{background:var(--bad)}
+  .res { margin-top:12px; min-height:40px; }
+  code { font-family:Consolas, monospace; font-size:12.5px; background:#f0f2f5; padding:1px 5px; border-radius:3px; }
+  ul.reasons { margin:6px 0 0; padding-left:18px; columns:2; }
+  footer { color:var(--muted); font-size:12px; margin-top:32px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Риск-контур онлайн-оплаты билетов · прототип</h1>
+  <span class="tag">Данные вымышленные</span>
+</header>
+<main>
+  <h2>Сравнение политик на одном потоке (30 дней)</h2>
+  <p class="note">Синтетический поток ≈ 28 тыс. попыток: добросовестные покупатели, туристы, кардинг, card testing, «дружественный» фрод.
+     Поведение эмитентов и покупателей задано допущениями (<code>/v1/metrics/simulation</code>). Это сравнение политик между собой, а не прогноз для Ticketon.</p>
+  <div class="card"><table id="cmp"><tr><td>Считаю симуляцию…</td></tr></table></div>
+  <div class="grid3" style="margin-top:14px" id="bars"></div>
+
+  <h2>Проверка платежа</h2>
+  <div class="card">
+    <div class="btns">
+      <button onclick="scoreDemo('honest')">Постоянный покупатель</button>
+      <button onclick="scoreDemo('tourist')">Турист с иностранной картой</button>
+      <button onclick="scoreDemo('carding')">Кардинг: прокси, 8 билетов, 2 ч до начала</button>
+    </div>
+    <div class="res" id="scoreRes"></div>
+  </div>
+
+  <h2>Чарджбэк: доказательная база и решение</h2>
+  <div class="card">
+    <div class="btns">
+      <button onclick="cbDemo('friendly')">«Не совершал», но билет отсканирован на входе</button>
+      <button onclick="cbDemo('fraud')">Краденая карта, событие ещё не прошло</button>
+    </div>
+    <div class="res" id="cbRes"></div>
+  </div>
+
+  <h2>Журнал решений</h2>
+  <div class="card"><table id="log"><tr><td class="note">Пока пусто — нажмите сценарий выше.</td></tr></table></div>
+  <footer>Прототип к отклику на задачу Astana Hub «Антифрод платежей и управление чарджбэками». Номера карт не обрабатываются — только токен, BIN и последние 4 цифры.</footer>
+</main>
+<script>
+const ACTION = {allow_frictionless:"Пропустить без челленджа", challenge_3ds:"3-D Secure (челлендж)",
+                challenge_3ds_strict:"3-D Secure + ограничения", decline:"Отклонить"};
+const POL = {no_3ds:"Без 3DS", "3ds_all":"3DS для всех", risk_based:"Риск-контур"};
+const fmt = (n, d=2) => Number(n).toLocaleString("ru-RU", {maximumFractionDigits:d});
+const kzt = n => fmt(n/1e6, 1) + " млн ₸";
+
+async function loadSim() {
+  const r = await (await fetch("/v1/metrics/simulation")).json();
+  const res = r.results;
+  const rows = [
+    ["Конверсия оплаты честных покупателей, %", "legit_conversion_pct", "max"],
+    ["Ложные отклонения правилами, %", "false_decline_pct", "min"],
+    ["Брошено на челлендже 3DS, %", "legit_abandon_3ds_pct", "min"],
+    ["Доля фрода в обороте, %", "fraud_share_turnover_pct", "min"],
+    ["Доля чарджбэков (к одобренным), %", "chargeback_ratio_pct", "min"],
+    ["Фрод-уведомления + споры (аналог VAMP), %", "fraud_and_dispute_ratio_pct", "min"],
+    ["Отказы эмитента (к отправленным), %", "issuer_decline_ratio_pct", "min"],
+    ["Авторизаций card testing дошло до эквайера", "card_testing_auths_sent", "min"],
+    ["Потери на чарджбэках и комиссиях", "losses_kzt", "min", kzt],
+    ["Недополученная выручка от честных", "lost_revenue_legit_kzt", "min", kzt],
+  ];
+  let h = "<tr><th>Метрика</th>" + res.map(x => `<th class="num ${x.policy==='risk_based'?'pol-risk':''}">${POL[x.policy]}</th>`).join("") + "</tr>";
+  for (const [title, key, better, f] of rows) {
+    const vals = res.map(x => x[key]);
+    const best = better === "max" ? Math.max(...vals) : Math.min(...vals);
+    const worst = better === "max" ? Math.min(...vals) : Math.max(...vals);
+    h += `<tr><td>${title}</td>` + res.map(x => {
+      const v = x[key]; const cls = v === best ? "best" : (v === worst ? "worst" : "");
+      return `<td class="num ${cls} ${x.policy==='risk_based'?'pol-risk':''}">${f ? f(v) : fmt(v, 3)}</td>`;
+    }).join("") + "</tr>";
+  }
+  document.getElementById("cmp").innerHTML = h;
+  const charts = [["Конверсия честных, %", "legit_conversion_pct", 80], ["Фрод в обороте, %", "fraud_share_turnover_pct", 0],
+                  ["Потери, млн ₸", "losses_kzt", 0]];
+  document.getElementById("bars").innerHTML = charts.map(([t, k, base]) => {
+    const vals = res.map(x => k === "losses_kzt" ? x[k]/1e6 : x[k]);
+    const mx = Math.max(...vals.map(v => v - base)) || 1;
+    return `<div class="card bars"><h3>${t}</h3>` + res.map((x, i) =>
+      `<div class="row"><span>${POL[x.policy]}</span><div class="bar ${x.policy==='risk_based'?'r':''}" style="width:${Math.max(2, 100*(vals[i]-base)/mx)}%"></div><span class="num">${fmt(vals[i], 2)}</span></div>`).join("") + "</div>";
+  }).join("");
+}
+
+async function scoreDemo(s) {
+  const d = await (await fetch(`/v1/demo/score/${s}`, {method:"POST"})).json();
+  document.getElementById("scoreRes").innerHTML =
+    `<p><span class="pill ${d.level}">${d.level}</span> &nbsp; балл <b>${d.score}</b> &nbsp;→&nbsp; <b>${ACTION[d.action]}</b>
+     ${d.card_testing ? " · признаки card testing" : ""}${d.shield_mode ? " · режим щита" : ""}</p>
+     <ul class="reasons">${d.reasons.map(r => `<li><code>${r}</code></li>`).join("") || "<li>сигналов риска нет</li>"}</ul>`;
+  loadLog();
+}
+
+async function cbDemo(s) {
+  const d = await (await fetch(`/v1/demo/chargeback/${s}`, {method:"POST"})).json();
+  const rec = {represent:"Оспорить (representment)", accept:"Принять чарджбэк", accept_and_refund:"Принять и вернуть"}[d.recommendation];
+  document.getElementById("cbRes").innerHTML =
+    `<p>Код <code>${d.reason_code}</code> · категория <b>${d.category}</b> · балл доказательств <b>${d.evidence_score}</b>
+     → <b>${rec}</b> · подготовить до ${d.respond_by}</p>
+     <table><tr><th>Доказательство</th><th class="num">Баллы</th><th>Детали</th></tr>
+     ${d.items.map(i => `<tr><td>${i.evidence}</td><td class="num">${i.points}</td><td>${i.detail}</td></tr>`).join("")}</table>
+     <p style="margin-top:10px"><b>Списки риска:</b> ${d.risk_actions.map(a => `<code>${a}</code>`).join(" ") || "—"}</p>
+     <p><b>Уведомления:</b></p><ul>${d.notifications.map(n => `<li>${n}</li>`).join("")}</ul>`;
+  loadLog();
+}
+
+async function loadLog() {
+  const rows = await (await fetch("/v1/decisions/recent?limit=8")).json();
+  if (!rows.length) return;
+  document.getElementById("log").innerHTML = "<tr><th>Время</th><th>Попытка</th><th class='num'>Сумма, ₸</th><th class='num'>Балл</th><th>Решение</th><th>Главные причины</th></tr>" +
+    rows.map(r => `<tr><td>${r.ts.replace("T"," ")}</td><td>${r.attempt_id}</td><td class="num">${fmt(r.amount_kzt,0)}</td><td class="num">${r.score}</td>
+      <td><span class="pill ${r.level}">${r.level}</span> ${ACTION[r.action]}</td><td>${r.reasons.slice(0,3).map(x=>`<code>${x}</code>`).join(" ")}</td></tr>`).join("");
+}
+loadSim(); loadLog();
+</script>
+</body>
+</html>
